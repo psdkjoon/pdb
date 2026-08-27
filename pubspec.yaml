@@ -1,0 +1,12 @@
+name: pdb
+description: My own database
+version: 1.0.0
+homepage: https://github.com/psdkjoon/pdb
+repository: https://github.com/psdkjoon/pdb
+issue_tracker: https://github.com/psdkjoon/pdb/issues
+topics:
+  - database
+  - dataset
+
+environment:
+  sdk: ^3.5.0
