@@ -8,5 +8,7 @@ class TypeTag {
   static const int stringValue = 0x1C;
   static const int intKey = 0xD5;
   static const int stringKey = 0xE5;
+  static const int formatVersion2 = 0x02;
+
   const TypeTag._();
 }

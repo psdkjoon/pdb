@@ -4,17 +4,26 @@ import 'dart:typed_data';
 
 import 'exceptions.dart';
 import 'tags.dart';
+import 'varint.dart';
 
 enum PDBTYPE { LIST, MAP }
 
 class Pdb {
   final PDBTYPE dataType;
-  final List<dynamic> _listData = [];
-  final Map<dynamic, dynamic> _mapData = {};
+  final List<dynamic> _listData;
+  final Map<dynamic, dynamic> _mapData;
 
-  Pdb({this.dataType = PDBTYPE.LIST});
+  Pdb({this.dataType = PDBTYPE.LIST, int? expectedSize})
+    : _listData = <dynamic>[],
+      _mapData = <dynamic, dynamic>{} {
+    if (dataType == PDBTYPE.LIST && expectedSize != null && expectedSize > 0) {
+      _listData.length = expectedSize;
+      _listData.length = 0;
+    }
+  }
 
-  int get length => dataType == PDBTYPE.LIST ? _listData.length : _mapData.length;
+  int get length =>
+      dataType == PDBTYPE.LIST ? _listData.length : _mapData.length;
 
   bool get isEmpty => length == 0;
 
@@ -52,22 +61,61 @@ class Pdb {
       throw DatabaseBroken('The Database type is invalid');
     }
 
+    final bool isV2 = bytes.length > 1 && bytes[1] == TypeTag.formatVersion2;
+
+    final pdb = isV2 ? await _openV2(bytes, type) : _openV1(bytes, type);
+
+    return pdb;
+  }
+
+  static Pdb _openV1(Uint8List bytes, PDBTYPE type) {
     final pdb = Pdb(dataType: type);
     final byteData = ByteData.sublistView(bytes);
     int offset = 1;
 
     if (type == PDBTYPE.LIST) {
       while (offset < bytes.length) {
-        final decoded = _decodeValue(bytes, byteData, offset);
+        final decoded = _decodeValueV1(bytes, byteData, offset);
         pdb._listData.add(decoded.value);
         offset = decoded.nextOffset;
       }
     } else {
       while (offset < bytes.length) {
-        final decodedKey = _decodeKey(bytes, byteData, offset);
+        final decodedKey = _decodeKeyV1(bytes, byteData, offset);
         offset = decodedKey.nextOffset;
 
-        final decodedVal = _decodeValue(bytes, byteData, offset);
+        final decodedVal = _decodeValueV1(bytes, byteData, offset);
+        offset = decodedVal.nextOffset;
+
+        pdb._mapData[decodedKey.value] = decodedVal.value;
+      }
+    }
+
+    return pdb;
+  }
+
+  static Future<Pdb> _openV2(Uint8List bytes, PDBTYPE type) async {
+    final countRead = Varint.readUnsigned(bytes, 2);
+    final entryCount = countRead.value;
+    int offset = countRead.nextOffset;
+
+    final pdb = Pdb(
+      dataType: type,
+      expectedSize: type == PDBTYPE.LIST ? entryCount : null,
+    );
+
+    if (type == PDBTYPE.LIST) {
+      for (var i = 0; i < entryCount; i++) {
+        final decoded = _decodeValueV2(bytes, offset);
+        pdb._listData.add(decoded.value);
+        offset = decoded.nextOffset;
+      }
+    } else {
+      for (var i = 0; i < entryCount; i++) {
+        final decodedKey = _decodeKeyV2(bytes, offset);
+        offset = decodedKey.nextOffset;
+
+        final decodedVal = _decodeValueV2(bytes, offset);
         offset = decodedVal.nextOffset;
 
         pdb._mapData[decodedKey.value] = decodedVal.value;
@@ -86,16 +134,20 @@ class Pdb {
     }
 
     final builder = BytesBuilder();
-    builder.addByte(dataType == PDBTYPE.LIST ? TypeTag.listDatabase : TypeTag.mapDatabase);
+    builder.addByte(
+      dataType == PDBTYPE.LIST ? TypeTag.listDatabase : TypeTag.mapDatabase,
+    );
+    builder.addByte(TypeTag.formatVersion2);
+    Varint.writeUnsigned(builder, length);
 
     if (dataType == PDBTYPE.LIST) {
       for (final item in _listData) {
-        _encodeValue(builder, item);
+        _encodeValueV2(builder, item);
       }
     } else {
       for (final entry in _mapData.entries) {
-        _encodeKey(builder, entry.key);
-        _encodeValue(builder, entry.value);
+        _encodeKeyV2(builder, entry.key);
+        _encodeValueV2(builder, entry.value);
       }
     }
 
@@ -103,17 +155,11 @@ class Pdb {
     await file.writeAsBytes(builder.toBytes());
   }
 
-  Future<void> addInt(int value, {dynamic key}) async {
-    _validateAndSet(key, value);
-  }
+  void addInt(int value, {dynamic key}) => _validateAndSet(key, value);
 
-  Future<void> addBool(bool value, {dynamic key}) async {
-    _validateAndSet(key, value);
-  }
+  void addBool(bool value, {dynamic key}) => _validateAndSet(key, value);
 
-  Future<void> addString(String value, {dynamic key}) async {
-    _validateAndSet(key, value);
-  }
+  void addString(String value, {dynamic key}) => _validateAndSet(key, value);
 
   void _validateAndSet(dynamic key, dynamic value) {
     if (dataType == PDBTYPE.LIST) {
@@ -244,47 +290,101 @@ class Pdb {
     return Map<dynamic, dynamic>.from(_mapData);
   }
 
-  static void _encodeKey(BytesBuilder builder, dynamic key) {
+  static void _encodeKeyV2(BytesBuilder builder, dynamic key) {
     if (key is int) {
       builder.addByte(TypeTag.intKey);
-      final data = ByteData(8);
-      data.setInt64(0, key);
-      builder.add(data.buffer.asUint8List());
+      Varint.write(builder, key);
     } else if (key is String) {
       builder.addByte(TypeTag.stringKey);
       final encoded = utf8.encode(key);
-      final lengthData = ByteData(4);
-      lengthData.setUint32(0, encoded.length);
-      builder.add(lengthData.buffer.asUint8List());
+      Varint.writeUnsigned(builder, encoded.length);
       builder.add(encoded);
     } else {
       throw KeyTypeInvalid('Key type is invalid: ${key.runtimeType}');
     }
   }
 
-  static void _encodeValue(BytesBuilder builder, dynamic value) {
+  static void _encodeValueV2(BytesBuilder builder, dynamic value) {
     if (value == null) {
       builder.addByte(TypeTag.nullValue);
     } else if (value is bool) {
       builder.addByte(value ? TypeTag.booleanTrue : TypeTag.booleanFalse);
     } else if (value is int) {
       builder.addByte(TypeTag.intValue);
-      final data = ByteData(8);
-      data.setInt64(0, value);
-      builder.add(data.buffer.asUint8List());
+      Varint.write(builder, value);
     } else if (value is String) {
       builder.addByte(TypeTag.stringValue);
       final encoded = utf8.encode(value);
-      final lengthData = ByteData(4);
-      lengthData.setUint32(0, encoded.length);
-      builder.add(lengthData.buffer.asUint8List());
+      Varint.writeUnsigned(builder, encoded.length);
       builder.add(encoded);
     } else {
       throw DatabaseBroken('Unsupported value type: ${value.runtimeType}');
     }
   }
 
-  static _DecodedItem _decodeKey(List<int> bytes, ByteData byteData, int offset) {
+  static _DecodedItem _decodeKeyV2(Uint8List bytes, int offset) {
+    if (offset >= bytes.length) {
+      throw DatabaseBroken('Corrupted database while reading key');
+    }
+
+    final tag = bytes[offset];
+    offset += 1;
+
+    if (tag == TypeTag.intKey) {
+      final r = Varint.read(bytes, offset);
+      return _DecodedItem(r.value, r.nextOffset);
+    } else if (tag == TypeTag.stringKey) {
+      final lenRead = Varint.readUnsigned(bytes, offset);
+      final len = lenRead.value;
+      final start = lenRead.nextOffset;
+      if (start + len > bytes.length) {
+        throw DatabaseBroken('Corrupted database reading string key bytes');
+      }
+      final key = utf8.decode(Uint8List.sublistView(bytes, start, start + len));
+      return _DecodedItem(key, start + len);
+    } else {
+      throw DatabaseBroken('Invalid key tag: $tag');
+    }
+  }
+
+  static _DecodedItem _decodeValueV2(Uint8List bytes, int offset) {
+    if (offset >= bytes.length) {
+      throw DatabaseBroken('Corrupted database while reading value');
+    }
+
+    final tag = bytes[offset];
+    offset += 1;
+
+    if (tag == TypeTag.nullValue) {
+      return _DecodedItem(null, offset);
+    } else if (tag == TypeTag.booleanTrue) {
+      return _DecodedItem(true, offset);
+    } else if (tag == TypeTag.booleanFalse) {
+      return _DecodedItem(false, offset);
+    } else if (tag == TypeTag.intValue) {
+      final r = Varint.read(bytes, offset);
+      return _DecodedItem(r.value, r.nextOffset);
+    } else if (tag == TypeTag.stringValue) {
+      final lenRead = Varint.readUnsigned(bytes, offset);
+      final len = lenRead.value;
+      final start = lenRead.nextOffset;
+      if (start + len > bytes.length) {
+        throw DatabaseBroken('Corrupted database reading string value bytes');
+      }
+      final value = utf8.decode(
+        Uint8List.sublistView(bytes, start, start + len),
+      );
+      return _DecodedItem(value, start + len);
+    } else {
+      throw DatabaseBroken('Invalid value tag: $tag');
+    }
+  }
+
+  static _DecodedItem _decodeKeyV1(
+    Uint8List bytes,
+    ByteData byteData,
+    int offset,
+  ) {
     if (offset >= bytes.length) {
       throw DatabaseBroken('Corrupted database while reading key');
     }
@@ -307,15 +407,20 @@ class Pdb {
       if (offset + len > bytes.length) {
         throw DatabaseBroken('Corrupted database reading string key bytes');
       }
-      final strBytes = bytes.sublist(offset, offset + len);
-      final key = utf8.decode(strBytes);
+      final key = utf8.decode(
+        Uint8List.sublistView(bytes, offset, offset + len),
+      );
       return _DecodedItem(key, offset + len);
     } else {
       throw DatabaseBroken('Invalid key tag: $tag');
     }
   }
 
-  static _DecodedItem _decodeValue(List<int> bytes, ByteData byteData, int offset) {
+  static _DecodedItem _decodeValueV1(
+    Uint8List bytes,
+    ByteData byteData,
+    int offset,
+  ) {
     if (offset >= bytes.length) {
       throw DatabaseBroken('Corrupted database while reading value');
     }
@@ -344,8 +449,9 @@ class Pdb {
       if (offset + len > bytes.length) {
         throw DatabaseBroken('Corrupted database reading string value bytes');
       }
-      final strBytes = bytes.sublist(offset, offset + len);
-      final value = utf8.decode(strBytes);
+      final value = utf8.decode(
+        Uint8List.sublistView(bytes, offset, offset + len),
+      );
       return _DecodedItem(value, offset + len);
     } else {
       throw DatabaseBroken('Invalid value tag: $tag');
