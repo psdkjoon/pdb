@@ -1,3 +1,7 @@
+## 1.2.0
+
+- added create paramether for method open `Pdb.open(path, create: true)`
+
 ## 1.1.0
 
 - `addInt`/`addBool`/`addString` are now synchronous (`void` instead of

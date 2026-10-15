@@ -30,7 +30,7 @@ map.addString('Alice', key: 'name');
 map.addInt(30, key: 'age');
 await map.save('user.pdb', replace: true);
 
-final loadedMap = await Pdb.open('user.pdb');
+final loadedMap = await Pdb.open('user.pdb', create: true);
 print(loadedMap.get('name')); // Alice
 ```
 

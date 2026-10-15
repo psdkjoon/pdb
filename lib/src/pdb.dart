@@ -14,8 +14,11 @@ class Pdb {
   final Map<dynamic, dynamic> _mapData;
 
   Pdb({this.dataType = PDBTYPE.LIST, int? expectedSize})
-    : _listData = <dynamic>[],
-      _mapData = <dynamic, dynamic>{} {
+      : _listData = <dynamic>[],
+        _mapData = <dynamic, dynamic>{} {
+    if (expectedSize != null && expectedSize < 0) {
+      throw ArgumentError('expectedSize must be non-negative');
+    }
     if (dataType == PDBTYPE.LIST && expectedSize != null && expectedSize > 0) {
       _listData.length = expectedSize;
       _listData.length = 0;
@@ -40,10 +43,21 @@ class Pdb {
     return dataType == PDBTYPE.LIST ? _listData : _mapData.values;
   }
 
-  static Future<Pdb> open(String path) async {
+  
+static Future<Pdb> open(
+    String path, {
+    bool create = false,
+    PDBTYPE type = PDBTYPE.LIST,
+  }) async {
     final file = File(path);
     if (!file.existsSync()) {
-      throw DatabaseFileDoesNotExist("File $path doesn't exist");
+      if (create) {
+        final pdb = Pdb(dataType: type);
+        await pdb.save(path);
+        return pdb;
+      } else {
+        throw DatabaseFileDoesNotExist("File $path doesn't exist");
+      }
     }
 
     final bytes = await file.readAsBytes();
@@ -52,18 +66,18 @@ class Pdb {
     }
 
     final header = bytes[0];
-    final PDBTYPE type;
+    final PDBTYPE detectedType;
     if (header == TypeTag.listDatabase) {
-      type = PDBTYPE.LIST;
+      detectedType = PDBTYPE.LIST;
     } else if (header == TypeTag.mapDatabase) {
-      type = PDBTYPE.MAP;
+      detectedType = PDBTYPE.MAP;
     } else {
       throw DatabaseBroken('The Database type is invalid');
     }
 
     final bool isV2 = bytes.length > 1 && bytes[1] == TypeTag.formatVersion2;
 
-    final pdb = isV2 ? await _openV2(bytes, type) : _openV1(bytes, type);
+    final pdb = isV2 ? await _openV2(bytes, detectedType) : _openV1(bytes, detectedType);
 
     return pdb;
   }
